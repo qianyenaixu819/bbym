@@ -2,7 +2,7 @@ import sqlite3
 import hashlib
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse, urlunparse
+from urllib.parse import parse_qs, urlparse
 
 DB = 'site.db'
 
@@ -13,10 +13,18 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY, user_id INTEGER, username TEXT, content TEXT, time TEXT, likes INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY, post_id INTEGER, user_id INTEGER, username TEXT, content TEXT, time TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS likes (user_id INTEGER, post_id INTEGER, PRIMARY KEY(user_id, post_id))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+    c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('announcement', '欢迎来到不药娘网 🏳️‍⚧️')")
     conn.commit()
     conn.close()
 
 init_db()
+
+def get_db_conn():
+    return sqlite3.connect(DB)
+
+def return_db_conn(conn):
+    conn.close()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -64,6 +72,8 @@ class Handler(BaseHTTPRequestHandler):
             self.post(uid, body)
         elif path.startswith('/comment/'):
             self.comment(uid, path.split('/')[-1], body)
+        elif path == '/admin/announcement':
+            self.admin_announcement(uid, body)
         else:
             self.send_error(404)
     
@@ -74,7 +84,7 @@ class Handler(BaseHTTPRequestHandler):
         per_page = 10
         offset = (page - 1) * per_page
         
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         
         if search:
@@ -82,7 +92,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             c.execute("SELECT COUNT(*) FROM posts")
         total = c.fetchone()[0]
-        total_pages = (total + per_page - 1) // per_page
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
         
         if search:
             c.execute("SELECT * FROM posts WHERE content LIKE ? ORDER BY time DESC LIMIT ? OFFSET ?", (f'%{search}%', per_page, offset))
@@ -96,6 +106,11 @@ class Handler(BaseHTTPRequestHandler):
             row = c.fetchone()
             if row:
                 username = row[0]
+        
+        # 公告
+        c.execute("SELECT value FROM settings WHERE key='announcement'")
+        row = c.fetchone()
+        announcement = row[0] if row else ''
         
         html = '''
         <!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -123,6 +138,22 @@ class Handler(BaseHTTPRequestHandler):
         <h1>不药娘网 🏳️‍⚧️</h1>
         <p>一个很精彩的人 · 唐毓文 · 升级版</p >
         '''
+        
+        if announcement:
+            html += f'<div class="card" style="background:rgba(0,113,227,0.1);"><b>📢 公告</b><br>{announcement}</div>'
+        
+        if uid == '1':
+            html += f'''
+            <details style="margin:10px 0;">
+                <summary>✏️ 编辑公告</summary>
+                <div class="card">
+                    <form method="POST" action="/admin/announcement">
+                        <textarea name="announcement" placeholder="输入公告...">{announcement}</textarea>
+                        <button type="submit">保存</button>
+                    </form>
+                </div>
+            </details>
+            '''
         
         if username:
             html += f'''
@@ -218,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             html += f'<a href="/?page={page+1}{f"&q={search}" if search else ""}">下一页</a >'
         html += '</div>'
         
-        conn.close()
+        return_db_conn(conn)
         html += '<div class="footer">🏳️‍⚧️ 跨儿帮助跨儿 · 唐毓文 · 升级版</div></body></html>'
         
         self.send_response(200)
@@ -226,11 +257,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html.encode())
         def profile(self, uid, username):
-                conn = sqlite3.connect(DB)
+            conn = get_db_conn()
         c = conn.cursor()
         c.execute("SELECT id FROM users WHERE username=?", (username,))
         row = c.fetchone()
         if not row:
+            return_db_conn(conn)
             self.send_error(404)
             return
         profile_uid = row[0]
@@ -270,7 +302,7 @@ class Handler(BaseHTTPRequestHandler):
         if current_user == username:
             html += '<p style="color:#86868b;">这是你的个人主页</p >'
         
-        conn.close()
+        return_db_conn(conn)
         html += '</body></html>'
         
         self.send_response(200)
@@ -291,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect('/?error=不能为空')
             return
         
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         try:
             h = hashlib.sha256(p.encode()).hexdigest()
@@ -305,14 +337,14 @@ class Handler(BaseHTTPRequestHandler):
         except:
             self.redirect('/?error=账号已存在')
         finally:
-            conn.close()
+            return_db_conn(conn)
     
     def login(self, body):
         u = body.get('username', [''])[0].strip()
         p = body.get('password', [''])[0].strip()
         
         if u == '4017' and p == '4017':
-            conn = sqlite3.connect(DB)
+            conn = get_db_conn()
             c = conn.cursor()
             c.execute("SELECT id FROM users WHERE username='4017'")
             row = c.fetchone()
@@ -323,19 +355,19 @@ class Handler(BaseHTTPRequestHandler):
                 uid = c.lastrowid
             else:
                 uid = row[0]
-            conn.close()
+            return_db_conn(conn)
             self.send_response(302)
             self.send_header('Set-Cookie', f'session={uid}; Path=/')
             self.send_header('Location', '/')
             self.end_headers()
             return
         
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         h = hashlib.sha256(p.encode()).hexdigest()
         c.execute("SELECT id FROM users WHERE username=? AND password=?", (u, h))
         row = c.fetchone()
-        conn.close()
+        return_db_conn(conn)
         if row:
             self.send_response(302)
             self.send_header('Set-Cookie', f'session={row[0]}; Path=/')
@@ -353,7 +385,7 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect('/')
             return
         
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         c.execute("SELECT username FROM users WHERE id=?", (uid,))
         row = c.fetchone()
@@ -362,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
             t = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             c.execute("INSERT INTO posts (user_id, username, content, time, likes) VALUES (?, ?, ?, ?, 0)", (uid, uname, content, t))
             conn.commit()
-        conn.close()
+        return_db_conn(conn)
         self.redirect('/')
     
     def comment(self, uid, pid, body):
@@ -374,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             self.redirect('/')
             return
         
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         c.execute("SELECT username FROM users WHERE id=?", (uid,))
         row = c.fetchone()
@@ -383,38 +415,38 @@ class Handler(BaseHTTPRequestHandler):
             t = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             c.execute("INSERT INTO comments (post_id, user_id, username, content, time) VALUES (?, ?, ?, ?, ?)", (pid, uid, uname, content, t))
             conn.commit()
-        conn.close()
+        return_db_conn(conn)
         self.redirect('/')
     
     def delete_post(self, uid, pid):
         if not uid:
             self.redirect('/')
             return
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         c.execute("DELETE FROM comments WHERE post_id=?", (pid,))
         c.execute("DELETE FROM likes WHERE post_id=?", (pid,))
         c.execute("DELETE FROM posts WHERE id=? AND user_id=?", (pid, uid))
         conn.commit()
-        conn.close()
+        return_db_conn(conn)
         self.redirect('/')
     
     def delete_comment(self, uid, cid):
         if not uid:
             self.redirect('/')
             return
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         c.execute("DELETE FROM comments WHERE id=? AND user_id=?", (cid, uid))
         conn.commit()
-        conn.close()
+        return_db_conn(conn)
         self.redirect('/')
     
     def like(self, uid, pid):
         if not uid:
             self.redirect('/')
             return
-        conn = sqlite3.connect(DB)
+        conn = get_db_conn()
         c = conn.cursor()
         c.execute("SELECT * FROM likes WHERE user_id=? AND post_id=?", (uid, pid))
         if c.fetchone():
@@ -424,7 +456,19 @@ class Handler(BaseHTTPRequestHandler):
             c.execute("INSERT INTO likes (user_id, post_id) VALUES (?, ?)", (uid, pid))
             c.execute("UPDATE posts SET likes = likes + 1 WHERE id=?", (pid,))
         conn.commit()
-        conn.close()
+        return_db_conn(conn)
+        self.redirect('/')
+    
+    def admin_announcement(self, uid, body):
+        if not uid or uid != '1':
+            self.redirect('/')
+            return
+        content = body.get('announcement', [''])[0].strip()
+        conn = get_db_conn()
+        c = conn.cursor()
+        c.execute("UPDATE settings SET value=? WHERE key='announcement'", (content,))
+        conn.commit()
+        return_db_conn(conn)
         self.redirect('/')
     
     def redirect(self, url):
