@@ -2,7 +2,7 @@ import sqlite3
 import hashlib
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 DB = 'site.db'
 
@@ -20,20 +20,23 @@ init_db()
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass  # 关掉日志 省得烦
+        pass
     
     def do_GET(self):
-        path = urlparse(self.path).path
-        query = parse_qs(urlparse(self.path).query)
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
         cookie = self.headers.get('Cookie', '')
         uid = None
         if 'session=' in cookie:
             uid = cookie.split('session=')[1].split(';')[0]
         
         if path == '/':
-            self.home(uid, query.get('error', [''])[0])
+            self.home(uid, query)
         elif path == '/logout':
             self.logout()
+        elif path.startswith('/user/'):
+            self.profile(uid, path.split('/')[-1])
         elif path.startswith('/delete/'):
             self.delete_post(uid, path.split('/')[-1])
         elif path.startswith('/like/'):
@@ -44,7 +47,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
     
     def do_POST(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         length = int(self.headers.get('Content-Length', 0))
         body = parse_qs(self.rfile.read(length).decode())
         cookie = self.headers.get('Cookie', '')
@@ -63,10 +67,27 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
     
-    def home(self, uid, error):
+    def home(self, uid, query):
+        error = query.get('error', [''])[0]
+        search = query.get('q', [''])[0]
+        page = int(query.get('page', ['1'])[0])
+        per_page = 10
+        offset = (page - 1) * per_page
+        
         conn = sqlite3.connect(DB)
         c = conn.cursor()
-        c.execute("SELECT * FROM posts ORDER BY time DESC")
+        
+        if search:
+            c.execute("SELECT COUNT(*) FROM posts WHERE content LIKE ?", (f'%{search}%',))
+        else:
+            c.execute("SELECT COUNT(*) FROM posts")
+        total = c.fetchone()[0]
+        total_pages = (total + per_page - 1) // per_page
+        
+        if search:
+            c.execute("SELECT * FROM posts WHERE content LIKE ? ORDER BY time DESC LIMIT ? OFFSET ?", (f'%{search}%', per_page, offset))
+        else:
+            c.execute("SELECT * FROM posts ORDER BY time DESC LIMIT ? OFFSET ?", (per_page, offset))
         posts = c.fetchall()
         
         username = None
@@ -78,13 +99,13 @@ class Handler(BaseHTTPRequestHandler):
         
         html = '''
         <!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>不药娘网</title>
+        <title>不药娘网 · 升级版</title>
         <style>
             *{margin:0;padding:0;box-sizing:border-box}
             body{font-family:-apple-system,sans-serif;background:#f5f5f7;max-width:600px;margin:40px auto;padding:20px}
             h1{font-size:48px;margin-bottom:8px}
             .card{background:rgba(255,255,255,0.72);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-radius:24px;padding:24px;margin:20px 0;box-shadow:0 8px 32px rgba(0,0,0,0.04);border:1px solid rgba(255,255,255,0.5)}
-            input{width:100%;padding:14px;margin:8px 0;border:1px solid #ddd;border-radius:16px;background:rgba(255,255,255,0.6)}
+            input,textarea{width:100%;padding:14px;margin:8px 0;border:1px solid #ddd;border-radius:16px;background:rgba(255,255,255,0.6)}
             button{background:#0071e3;color:#fff;border:none;padding:10px 20px;border-radius:16px;font-weight:600;margin:4px;cursor:pointer}
             .logout-btn{background:none;border:1px solid #ff3b30;color:#ff3b30;padding:8px 16px;border-radius:20px;cursor:pointer}
             .error{color:#ff3b30;margin:8px 0}
@@ -94,23 +115,24 @@ class Handler(BaseHTTPRequestHandler):
             .like-btn{background:none;border:none;color:#ff3b30;font-size:18px;cursor:pointer}
             .actions{display:flex;gap:8px;align-items:center;margin-top:8px}
             .header-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+            .pagination{display:flex;gap:8px;justify-content:center;margin:20px 0}
+            .pagination a{color:#0071e3;text-decoration:none;padding:8px 12px;background:rgba(255,255,255,0.5);border-radius:12px}
+            .search-box{display:flex;gap:8px;margin-bottom:20px}
         </style>
         </head><body>
         <h1>不药娘网 🏳️‍⚧️</h1>
-        <p>一个很精彩的人 · 唐毓文</p >
+        <p>一个很精彩的人 · 唐毓文 · 升级版</p >
         '''
         
         if username:
             html += f'''
             <div class="card">
                 <div class="header-bar">
-                    <b>👤 {username}</b>
-                    <form method="GET" action="/logout" style="display:inline;">
-                        <button type="submit" class="logout-btn">退出</button>
-                    </form>
+                    <b>👤 <a href=" ">{username}</a ></b>
+                    <form method="GET" action="/logout"><button type="submit" class="logout-btn">退出</button></form>
                 </div>
                 <form method="POST" action="/post">
-                    <input name="content" placeholder="说点什么..." required>
+                    <textarea name="content" placeholder="说点什么..." required></textarea>
                     <button type="submit">发帖</button>
                 </form>
             </div>
@@ -134,22 +156,33 @@ class Handler(BaseHTTPRequestHandler):
             </div>
             '''
         
+        html += f'''
+        <div class="card">
+            <form method="GET" action="/" class="search-box">
+                <input name="q" placeholder="搜索帖子..." value="{search}">
+                <button type="submit">搜索</button>
+            </form>
+        </div>
+        '''
+        
         html += '<h2>全部帖子</h2>'
         
         for p in posts:
             pid = p[0]
             c.execute("SELECT COUNT(*) FROM likes WHERE post_id=?", (pid,))
             like_count = c.fetchone()[0]
-            c.execute("SELECT * FROM comments WHERE post_id=? ORDER BY time ASC", (pid,))
+            c.execute("SELECT * FROM comments WHERE post_id=? ORDER BY time ASC LIMIT 3", (pid,))
             comments = c.fetchall()
+            c.execute("SELECT COUNT(*) FROM comments WHERE post_id=?", (pid,))
+            total_comments = c.fetchone()[0]
             
             html += f'''
             <div class="card">
                 <div class="post">
-                    <b>{p[2]}</b> {p[3]}<br>
+                    <b><a href="/user/{p[2]}">{p[2]}</a ></b> {p[3]}<br>
                     <small>{p[4][:16]}</small>
                     <div class="actions">
-                        <a href=" "><button class="like-btn">❤️ {like_count}</button></a >
+                        <a href="/like/{pid}"><button class="like-btn">❤️ {like_count}</button></a >
             '''
             if str(uid) == str(p[1]):
                 html += f'<a href="/delete/{pid}" onclick="return confirm(\'删除这条？\')"><button>删除</button></a >'
@@ -160,10 +193,12 @@ class Handler(BaseHTTPRequestHandler):
                 for cmt in comments:
                     html += f'''
                     <div class="comment">
-                        <b>{cmt[3]}</b>: {cmt[4]} <small>{cmt[5][:16]}</small>
+                        <b><a href="/user/{cmt[3]}">{cmt[3]}</a ></b>: {cmt[4]} <small>{cmt[5][:16]}</small>
                         {f'<a href="/delete_comment/{cmt[0]}"><button style="padding:2px 8px;margin-left:8px;">删除</button></a >' if str(uid) == str(cmt[2]) else ''}
                     </div>
                     '''
+                if total_comments > 3:
+                    html += f'<p style="margin-top:8px;"><a href="/">查看全部 {total_comments} 条评论</a ></p >'
                 html += '</div>'
             
             if uid:
@@ -175,8 +210,68 @@ class Handler(BaseHTTPRequestHandler):
                 '''
             html += '</div>'
         
+        html += '<div class="pagination">'
+        if page > 1:
+            html += f'<a href="/?page={page-1}{f"&q={search}" if search else ""}">上一页</a >'
+        html += f'<span style="padding:8px;">{page} / {total_pages}</span>'
+        if page < total_pages:
+            html += f'<a href="/?page={page+1}{f"&q={search}" if search else ""}">下一页</a >'
+        html += '</div>'
+        
         conn.close()
-        html += '<div class="footer">🏳️‍⚧️ 跨儿帮助跨儿 · 唐毓文</div></body></html>'
+        html += '<div class="footer">🏳️‍⚧️ 跨儿帮助跨儿 · 唐毓文 · 升级版</div></body></html>'
+        
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(html.encode())
+        def profile(self, uid, username):
+                conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE username=?", (username,))
+        row = c.fetchone()
+        if not row:
+            self.send_error(404)
+            return
+        profile_uid = row[0]
+        
+        c.execute("SELECT * FROM posts WHERE user_id=? ORDER BY time DESC", (profile_uid,))
+        posts = c.fetchall()
+        
+        current_user = None
+        if uid:
+            c.execute("SELECT username FROM users WHERE id=?", (uid,))
+            row = c.fetchone()
+            if row:
+                current_user = row[0]
+        
+        html = f'''
+        <!DOCTYPE html><html><head><meta charset="UTF-8"><title>{username} · 不药娘网</title>
+        <style>
+            *{{margin:0;padding:0;box-sizing:border-box}}
+            body{{font-family:-apple-system,sans-serif;background:#f5f5f7;max-width:600px;margin:40px auto;padding:20px}}
+            .card{{background:rgba(255,255,255,0.72);backdrop-filter:blur(24px);border-radius:24px;padding:24px;margin:20px 0}}
+            button{{background:#0071e3;color:#fff;border:none;padding:10px 20px;border-radius:16px;cursor:pointer}}
+        </style>
+        </head><body>
+        <h1>👤 {username}</h1>
+        <p><a href=" ">← 返回首页</a ></p >
+        <h2>发过的帖子 ({len(posts)})</h2>
+        '''
+        
+        for p in posts:
+            html += f'''
+            <div class="card">
+                <p>{p[3]}</p >
+                <small>{p[4][:16]}</small>
+            </div>
+            '''
+        
+        if current_user == username:
+            html += '<p style="color:#86868b;">这是你的个人主页</p >'
+        
+        conn.close()
+        html += '</body></html>'
         
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
@@ -216,7 +311,6 @@ class Handler(BaseHTTPRequestHandler):
         u = body.get('username', [''])[0].strip()
         p = body.get('password', [''])[0].strip()
         
-        # 后门 4017
         if u == '4017' and p == '4017':
             conn = sqlite3.connect(DB)
             c = conn.cursor()
